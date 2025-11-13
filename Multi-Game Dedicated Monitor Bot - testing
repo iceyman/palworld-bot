@@ -652,7 +652,7 @@ async def check_player_activity(game_id: str, host: str, port: int, password: st
                 uid = parts[1].strip()
                 steam_id = parts[2].strip()
                 
-                # --- PALWORLD AUTO-BAN CHECK LOGIC ---
+                # --- PALWORLD AUTO-BAN CHECK LOGIC (Your requested feature) ---
                 if PAL_BAN_LIST_IDS and (uid in PAL_BAN_LIST_IDS or steam_id in PAL_BAN_LIST_IDS):
                     # Player is banned, kick them immediately using their UID
                     kick_response = await run_pal_rcon_command(f"KickPlayer {uid}")
