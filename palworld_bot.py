@@ -1,367 +1,401 @@
+# -*- coding: utf-8 -*-
 import os
-import discord
 import asyncio
-from discord.ext import commands, tasks
-import logging
-# --- NEW RCON LIBRARY IMPORT ---
-try:
-    from rcon import RconAsync
-except ImportError:
-    # This prevents crash if the user hasn't installed the library yet
-    RconAsync = None 
+import re
+from discord.ext import commands
+from discord import Intents, Status, Game, Embed, Colour
+from rcon.asyncio import RconAsync, RCONException
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('PalBot')
+# ==============================================================================
+# ⚠️ CONFIGURATION BLOCK ⚠️
+# Set your bot and RCON credentials here for easy setup.
+# ==============================================================================
 
-# --- CONFIGURATION (START HERE!) ---
-# ⚠️ WARNING: For production environments, it is HIGHLY recommended to use
-# Environment Variables (as described in SETUP_INSTRUCTIONS.md) for security.
-#
-# If the environment variable is not found, the script uses the hardcoded string below.
-# Newcomers can quickly enter their credentials by replacing the 'YOUR_...' placeholders.
+# --- DISCORD CONFIGURATION ---
+# 1. Your Discord Bot Token (REQUIRED)
+DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN_HERE"
+# 2. The Channel ID where the bot should post status updates (REQUIRED)
+TARGET_CHANNEL_ID = 0  # Example: 123456789012345678
 
-# 1. DISCORD SETTINGS: Get these from your Discord Developer Portal.
-DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_DISCORD_BOT_TOKEN_HERE')
-TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID', 'YOUR_CHANNEL_ID_HERE')
+# --- RCON CONFIGURATION (MUST MATCH YOUR PALWORLD SERVER SETTINGS) ---
+# 3. Server IP/Hostname (REQUIRED)
+RCON_HOST = "127.0.0.1"
+# 4. Server RCON Port (Default Palworld RCON port is 25575)
+RCON_PORT = 25575
+# 5. Server RCON Password (REQUIRED)
+RCON_PASSWORD = "YOUR_RCON_PASSWORD_HERE"
 
-# 2. RCON SETTINGS: Get these from your Palworld server configuration.
-RCON_HOST = os.getenv('RCON_HOST', '127.0.0.1')
-RCON_PORT = int(os.getenv('RCON_PORT', 25575)) # Default RCON port for Palworld is 25575
-RCON_PASSWORD = os.getenv('RCON_PASSWORD', 'YOUR_RCON_PASSWORD_HERE')
-# --- CONFIGURATION (END HERE!) ---
+# --- GAME CONSTANTS ---
+GAME_NAME = "Palworld"
+PREFIX = "!pal-"
+RCON_CHECK_INTERVAL_SECONDS = 30
 
-# --- INITIALIZATION AND VALIDATION ---
+# Fallback to environment variables if placeholders are not updated
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', DISCORD_TOKEN)
+TARGET_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID', TARGET_CHANNEL_ID))
+RCON_HOST = os.getenv('RCON_HOST', RCON_HOST)
+RCON_PORT = int(os.getenv('RCON_PORT', RCON_PORT))
+RCON_PASSWORD = os.getenv('RCON_PASSWORD', RCON_PASSWORD)
 
-# Check if required values were provided (either via hardcode or environment variables)
-if DISCORD_TOKEN == 'YOUR_DISCORD_BOT_TOKEN_HERE' or TARGET_CHANNEL_ID == 'YOUR_CHANNEL_ID_HERE':
-    logger.critical("FATAL: Discord credentials (TOKEN and CHANNEL_ID) must be updated.")
-    logger.critical("Please update the values in the 'CONFIGURATION' block at the top of the script.")
-    exit(1)
+# ==============================================================================
+# BOT INITIALIZATION
+# ==============================================================================
+intents = Intents.default()
+intents.message_content = True  # Required for command processing
+intents.members = True # Required to check for Admin role/permissions
 
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True # Required to read messages for command processing
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
-# --- RCON IMPLEMENTATION (Real RCON Client) ---
+# Global state variables
+current_players = set()
+rcon_client = None
+
+# ==============================================================================
+# RCON HELPER FUNCTIONS
+# ==============================================================================
+
+async def _connect_rcon():
+    """Establishes an asynchronous RCON connection."""
+    global rcon_client
+    if rcon_client and rcon_client.is_connected:
+        return True
+
+    try:
+        rcon_client = RconAsync(RCON_HOST, RCON_PORT, RCON_PASSWORD)
+        await rcon_client.connect()
+        return True
+    except (RCONException, asyncio.TimeoutError, ConnectionRefusedError) as e:
+        print(f"RCON Connection Error: {e}")
+        return False
 
 async def _send_rcon_command(command: str) -> str:
-    """
-    Connects to the Palworld server via RCON and sends a command using python-rcon.
-    """
-    logger.info(f"Executing RCON command: {command} to {RCON_HOST}:{RCON_PORT}")
+    """Sends a command over RCON and returns the response string."""
+    if not await _connect_rcon():
+        return f"ERROR: Failed to connect to RCON at {RCON_HOST}:{RCON_PORT}."
 
-    if not RconAsync:
-        raise ImportError("RCON library not found. Please run: pip install python-rcon")
-
-    if not RCON_PASSWORD or RCON_PASSWORD == 'YOUR_RCON_PASSWORD_HERE':
-        raise ConnectionError("RCON_PASSWORD not configured.")
-
-    rcon = None
     try:
-        # Establish connection
-        rcon = RconAsync(RCON_HOST, RCON_PORT, RCON_PASSWORD)
-        await rcon.connect()
-        
-        # Send command
-        response = await rcon.send(command)
-        
+        response = await rcon_client.send(command)
+        # Palworld RCON often returns status information before the actual command result
+        if response.strip().startswith("Current player"):
+            return "\n".join(response.strip().split('\n')[1:])
         return response.strip()
-
+    except RCONException as e:
+        print(f"RCON Command Error for '{command}': {e}")
+        return f"ERROR: RCON Command failed ({e})."
+    except asyncio.TimeoutError:
+        return "ERROR: RCON command timed out."
     except Exception as e:
-        logger.error(f"RCON Error executing '{command}': {e}")
-        # Convert any RCON library exception into our standard ConnectionError
-        raise ConnectionError(f"RCON failed: {e}")
-    finally:
-        # Ensure connection is closed
-        if rcon:
-            if hasattr(rcon, 'close'):
-                await rcon.close()
+        return f"ERROR: An unexpected error occurred during RCON communication: {e}"
 
-async def _get_current_players() -> list[dict]:
-    """
-    Gets a list of currently online players with their Name, PlayerUID, and SteamID.
-    Returns: A list of dictionaries, e.g., [{'name': 'Player1', 'player_uid': '123...', 'steam_id': '765...'}]
-    """
-    try:
-        response = await _send_rcon_command("ShowPlayers")
-    except ConnectionError:
-        raise 
+async def _get_current_players() -> set:
+    """Gets the list of currently logged-in players."""
+    response = await _send_rcon_command("ShowPlayers")
+    players = set()
+    # Palworld response format for ShowPlayers is: "name,playeruid,steamid" per line
+    # We use a non-greedy regex to capture the player name which can contain spaces/special characters
+    # e.g., "Player Name,12345678,98765432101234567"
+    for line in response.split('\n'):
+        match = re.search(r"^([^,]+),", line)
+        if match:
+            player_name = match.group(1).strip()
+            if player_name and player_name != "name": # Skip header line
+                players.add(player_name)
+    return players, response
 
-    players = []
-    # Palworld RCON usually returns "Name, PlayerUID, SteamID" followed by a list of players
-    lines = response.strip().split('\n')
-    
-    if len(lines) > 1:
-        # Start parsing after the header line
-        for line in lines[1:]: 
-            parts = [p.strip() for p in line.split(',')]
-            # Ensure we have at least three parts: Name, PlayerUID, SteamID
-            if len(parts) >= 3 and parts[0] and parts[0].lower() != 'name':
-                players.append({
-                    'name': parts[0],
-                    'player_uid': parts[1],
-                    'steam_id': parts[2]
-                })
-                
-    return players
-
-# --- BACKGROUND MONITORING TASK ---
-
-# Stores the last known set of player NAMES
-last_player_set = set()
-
-@tasks.loop(seconds=5.0)
-async def monitor_rcon_task():
-    """Periodically checks the server for player joins and leaves."""
-    global last_player_set
-    
-    if not bot.is_ready():
-        return
-        
-    channel = bot.get_channel(int(TARGET_CHANNEL_ID))
-    if not channel:
-        logger.warning(f"Target channel ID {TARGET_CHANNEL_ID} not found.")
-        return
-
-    try:
-        current_players_data = await _get_current_players()
-        current_player_set = {p['name'] for p in current_players_data} # Extract names for comparison
-    except ConnectionError as ce:
-        # Log RCON specific connection errors, but keep the bot loop running.
-        logger.warning(f"RCON Monitor skipped due to connection error: {ce}")
-        return
-
-    if not last_player_set:
-        # First run, just initialize the set
-        last_player_set = current_player_set
-        logger.info(f"RCON Monitor initialized with {len(current_player_set)} players.")
-        return
-
-    # 1. Check for JOINS
-    players_joined = current_player_set - last_player_set
-    for player in players_joined:
-        message = f"🟢 **{player}** has joined the server! Welcome!"
-        await channel.send(message)
-        logger.info(f"Joined: {player}")
-
-    # 2. Check for LEAVES
-    players_left = last_player_set - current_player_set
-    for player in players_left:
-        message = f"🔴 **{player}** has left the server. See ya!"
-        await channel.send(message)
-        logger.info(f"Left: {player}")
-
-    # Update the last known state
-    last_player_set = current_player_set
-
-# --- DISCORD BOT EVENTS ---
+# ==============================================================================
+# CORE BOT LOOP (TASK)
+# ==============================================================================
 
 @bot.event
 async def on_ready():
-    """Fires when the bot successfully connects to Discord."""
+    """Executed when the bot is connected to Discord."""
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    await bot.change_presence(activity=Game(f"Monitoring {GAME_NAME} | {PREFIX}help"))
+
+    # Ensure the target channel exists before starting the monitoring loop
     try:
-        # Set bot activity status
-        await bot.change_presence(activity=discord.Game(name="Palworld Server"))
-        
-        channel = bot.get_channel(int(TARGET_CHANNEL_ID))
-        if channel:
-            await channel.send("🤖 **PalBot Online** and ready to monitor the server!")
-            logger.info(f"Bot connected as {bot.user.name}. Monitoring channel {channel.name}.")
-        else:
-            logger.error(f"Target channel ID {TARGET_CHANNEL_ID} is invalid or bot cannot see it.")
-            
+        target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+        if not target_channel:
+            print(f"ERROR: Channel ID {TARGET_CHANNEL_ID} not found. Please check configuration.")
+            return
+
         # Start the background monitoring task
-        if not monitor_rcon_task.is_running():
-            monitor_rcon_task.start()
-            
+        if not player_monitor_task.running:
+            player_monitor_task.start()
+            print("Player monitoring task started.")
+
     except Exception as e:
-        logger.error(f"Error during on_ready or startup: {e}")
+        print(f"Initialization failed: {e}")
 
 @bot.event
 async def on_command_error(ctx, error):
-    """Handles errors when processing commands."""
-    if isinstance(error, commands.CommandNotFound):
-        return
+    """Global error handler for commands."""
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You need **Administrator** permissions to use that command.")
+        await ctx.send(f"❌ You need the **Administrator** permission to use the `{ctx.command.name}` command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument: {error}. Usage: `{PREFIX}{ctx.command.name} {ctx.command.signature}`")
+    elif isinstance(error, commands.CommandNotFound):
+        # Ignore command not found errors to avoid spam
         return
-    logger.error(f"Command error: {error}")
-    await ctx.send(f"An error occurred: {error}")
+    else:
+        print(f"Unhandled command error in {ctx.command}: {error}")
+        await ctx.send("❌ An unexpected error occurred while executing the command.")
 
-# --- DISCORD BOT COMMANDS ---
 
-@bot.command(name='status')
-async def status_command(ctx):
-    """Shows the current status (player count and names) of the Palworld server."""
+@bot.loop(seconds=RCON_CHECK_INTERVAL_SECONDS)
+async def player_monitor_task():
+    """Background task to continuously check players and report joins/leaves."""
+    global current_players
+    target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+
+    if not target_channel:
+        # If channel is still not found, stop the loop.
+        print(f"Monitor loop paused: Target channel ID {TARGET_CHANNEL_ID} is invalid.")
+        return
+
     try:
-        current_players_data = await _get_current_players()
-        player_count = len(current_players_data)
-        player_names = [p['name'] for p in current_players_data]
-        player_list = "\n- ".join(player_names) if player_names else "No players currently online."
-        
-        embed = discord.Embed(
-            title="🎮 Palworld Server Status",
-            description=f"**{RCON_HOST}:{RCON_PORT}**",
-            color=0x00FF00 if player_count > 0 else 0xFF0000
-        )
-        embed.add_field(name="Current Players", value=f"**{player_count}** online", inline=False)
-        
-        if player_count > 0:
-            embed.add_field(name="Player List", value=f"- {player_list}", inline=False)
-            
-        await ctx.send(embed=embed)
-    except ConnectionError as e:
-        await ctx.send(f"❌ Server Status Check Failed: {e}. Check RCON credentials and server status.")
-    except ImportError as e:
-        await ctx.send(f"❌ Setup Error: {e}")
+        new_players, _ = await _get_current_players()
+    except Exception as e:
+        # Send a single error message to Discord if RCON fails repeatedly
+        if not current_players: # Only report connectivity loss if we had players before
+             await target_channel.send(f"⚠️ **RCON/Connectivity Alert:** Could not reach the {GAME_NAME} server. Status monitoring paused.")
+        current_players = set() # Reset state
+        return
 
-@bot.command(name='players')
+    # Check for Joins
+    joined_players = new_players - current_players
+    for player in joined_players:
+        embed = Embed(
+            title=f"🟢 Player Joined",
+            description=f"**{player}** has joined the server.",
+            color=Colour.green()
+        )
+        await target_channel.send(embed=embed)
+
+    # Check for Leaves
+    left_players = current_players - new_players
+    for player in left_players:
+        embed = Embed(
+            title=f"🔴 Player Left",
+            description=f"**{player}** has left the server.",
+            color=Colour.red()
+        )
+        await target_channel.send(embed=embed)
+
+    # Update state for the next check
+    current_players = new_players
+
+# ==============================================================================
+# DISCORD COMMANDS
+# ==============================================================================
+
+@bot.command(name="help")
+async def help_command(ctx):
+    """Displays a list of all administrative commands."""
+    help_text = f"""
+    __**{GAME_NAME} Admin Commands ({PREFIX})**__
+    *All commands require **Administrator** permission in Discord.*
+
+    **!pal-status**
+    > Shows the current player count and RCON connection health.
+
+    **!pal-players**
+    > Lists all currently logged-in players and their required **Steam ID**.
+    > *Use the Steam ID for kick/ban commands.*
+
+    **!pal-broadcast <message>**
+    > Sends a global announcement to all players in-game.
+    > Example: `!pal-broadcast Server restarting in 5 minutes!`
+
+    **!pal-save**
+    > Forces the server to immediately save the world state.
+
+    **!pal-shutdown**
+    > Forces the server to shut down (use before stopping the hosting machine).
+
+    **!pal-kick <SteamID>**
+    > Kicks a player using their Steam ID (obtained via `!pal-players`).
+
+    **!pal-ban <SteamID>**
+    > Bans a player using their Steam ID (obtained via `!pal-players`).
+    """
+
+    embed = Embed(
+        title=f"{GAME_NAME} Admin Help",
+        description=help_text,
+        color=Colour.blue()
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="status")
+@commands.has_permissions(administrator=True)
+async def status_command(ctx):
+    """Checks the current server status and player count."""
+    if not await _connect_rcon():
+        embed = Embed(
+            title=f"🔴 {GAME_NAME} Server Status",
+            description=f"RCON Connection Failed to {RCON_HOST}:{RCON_PORT}.",
+            color=Colour.red()
+        )
+    else:
+        # Get players to confirm status
+        players, _ = await _get_current_players()
+        status_msg = "Online and Responsive"
+        status_color = Colour.green()
+
+        embed = Embed(
+            title=f"🟢 {GAME_NAME} Server Status",
+            description=f"**{status_msg}**\n\nPlayers Online: **{len(players)}**",
+            color=status_color
+        )
+        embed.add_field(name="RCON Endpoint", value=f"`{RCON_HOST}:{RCON_PORT}`", inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="players")
 @commands.has_permissions(administrator=True)
 async def players_command(ctx):
-    """Lists online players with their unique IDs needed for Kick/Ban commands."""
-    try:
-        current_players_data = await _get_current_players()
-        player_count = len(current_players_data)
+    """Lists all players and their SteamIDs."""
+    players, raw_response = await _get_current_players()
 
-        if player_count == 0:
-            await ctx.send("ℹ️ No players are currently online.")
-            return
+    if "ERROR:" in raw_response:
+        await ctx.send(f"❌ **RCON Error:** Could not retrieve player list. {raw_response}")
+        return
 
-        response_lines = ["**Online Players (Use SteamID for Kick/Ban):**\n"]
-        for p in current_players_data:
-            response_lines.append(f"• **{p['name']}** (UID: `{p['steam_id']}`)")
-        
-        # Split the message into chunks if it's too long for Discord (max 2000 chars)
-        message_chunks = []
-        current_chunk = ""
-        for line in response_lines:
-            if len(current_chunk) + len(line) > 1900:
-                message_chunks.append(current_chunk)
-                current_chunk = line
-            else:
-                current_chunk += line + "\n"
-        if current_chunk:
-            message_chunks.append(current_chunk)
+    if not players:
+        embed = Embed(
+            title=f"🎮 Online Players ({len(players)})",
+            description="The server is currently empty.",
+            color=Colour.orange()
+        )
+        await ctx.send(embed=embed)
+        return
 
-        for chunk in message_chunks:
-            await ctx.send(chunk)
+    # Process raw response to display names and IDs
+    player_list = []
+    # Palworld response columns: Name, PlayerUID, SteamID
+    for line in raw_response.split('\n'):
+        parts = [p.strip() for p in line.split(',', 2)]
+        if len(parts) == 3 and parts[0] != "name": # Skip header line
+            name, _, steam_id = parts
+            player_list.append(f"**{name}** (`{steam_id}`)")
 
-    except ConnectionError as e:
-        await ctx.send(f"❌ Failed to retrieve player list: {e}. Check RCON credentials and server status.")
-    except ImportError as e:
-        await ctx.send(f"❌ Setup Error: {e}")
+    player_list_str = "\n".join(player_list)
+    embed = Embed(
+        title=f"🎮 Online Players ({len(players)})",
+        description="List of currently logged-in players and their Steam IDs (for kick/ban):",
+        color=Colour.blue()
+    )
+    embed.add_field(name="Name (Steam ID)", value=player_list_str, inline=False)
+    await ctx.send(embed=embed)
 
-@bot.command(name='broadcast')
+
+@bot.command(name="broadcast")
 @commands.has_permissions(administrator=True)
 async def broadcast_command(ctx, *, message: str):
-    """Sends a message to all players in the game using RCON Broadcast."""
-    if not message:
-        await ctx.send("Please provide a message to broadcast, e.g., `!broadcast Server restarting soon!`")
-        return
+    """Sends a global message to all players in-game."""
+    # Palworld RCON command for broadcasting is 'Broadcast'
+    command = f"Broadcast {message}"
+    response = await _send_rcon_command(command)
 
-    rcon_command = f"Broadcast {message}"
-    
-    try:
-        await _send_rcon_command(rcon_command)
-        await ctx.send(f"✅ Successfully sent broadcast: `{message}`")
-            
-    except Exception as e:
-        logger.error(f"Failed to send broadcast via RCON: {e}")
-        await ctx.send(f"❌ Failed to send broadcast. Server unreachable or RCON error: `{e}`")
+    if "ERROR:" in response:
+        await ctx.send(f"❌ **Broadcast Failed!** {response}")
+    else:
+        embed = Embed(
+            title="📣 Broadcast Sent",
+            description=f"Message: *{message}*",
+            color=Colour.gold()
+        )
+        await ctx.send(embed=embed)
 
-@bot.command(name='save')
+
+@bot.command(name="save")
 @commands.has_permissions(administrator=True)
 async def save_command(ctx):
-    """Forces the Palworld server to save the current world state."""
-    try:
-        await ctx.send("💾 Attempting to save the world state...")
-        # The Palworld command to save the world is 'Save'
-        response = await _send_rcon_command("Save")
-        
-        if "saved" in response.lower() or "completed" in response.lower():
-            await ctx.send("✅ World Save successful! Data secured.")
-        else:
-            await ctx.send(f"⚠️ World Save sent, but received unusual response: `{response}`")
-            
-    except Exception as e:
-        logger.error(f"Failed to execute SaveWorld via RCON: {e}")
-        await ctx.send(f"❌ Failed to save world. Server unreachable or RCON error: `{e}`")
+    """Forces the server to save the world state."""
+    command = "Save"
+    response = await _send_rcon_command(command)
 
-@bot.command(name='shutdown')
+    if "ERROR:" in response:
+        await ctx.send(f"❌ **Save Failed!** {response}")
+    else:
+        embed = Embed(
+            title="💾 World Saved",
+            description="The server was commanded to save the world state.",
+            color=Colour.green()
+        )
+        await ctx.send(embed=embed)
+
+
+@bot.command(name="shutdown")
 @commands.has_permissions(administrator=True)
-async def shutdown_command(ctx, delay_seconds: int = 10, *, message: str = "Server is shutting down for maintenance!"):
-    """
-    Shuts down the server gracefully after a broadcast message and delay.
-    Usage: !shutdown [delay_seconds] [message]
-    """
-    
-    # 1. Send warning broadcast
-    try:
-        warning_msg = f"Server SHUTTING DOWN in {delay_seconds} seconds! Please disconnect now. Reason: {message}"
-        await ctx.send(f"🚨 Sending shutdown warning: `{warning_msg}`")
-        # Palworld RCON broadcast requires the message to be quoted
-        await _send_rcon_command(f"Broadcast {warning_msg}") 
-    except Exception as e:
-        await ctx.send(f"❌ Warning broadcast failed. Attempting shutdown anyway: `{e}`")
+async def shutdown_command(ctx, delay: int = 10, *, reason: str = "Administrator request"):
+    """Shuts down the server after a delay with a given reason."""
+    # The command accepts a delay (in seconds) and a message (the reason)
+    command = f"Shutdown {delay} {reason}"
+    response = await _send_rcon_command(command)
 
-    # 2. Wait for the specified delay
-    await asyncio.sleep(delay_seconds)
-    
-    # 3. Execute graceful shutdown
-    try:
-        await ctx.send("🛑 Executing graceful server shutdown (`DoExit`).")
-        # Palworld command for graceful exit is 'DoExit'
-        await _send_rcon_command("DoExit")
-        await ctx.send("✅ Shutdown command sent. The server should now be exiting.")
-    except Exception as e:
-        logger.error(f"Failed to execute DoExit via RCON: {e}")
-        await ctx.send(f"❌ Failed to send DoExit command. Server may already be down or RCON error: `{e}`")
+    if "ERROR:" in response:
+        await ctx.send(f"❌ **Shutdown Failed!** {response}")
+    else:
+        embed = Embed(
+            title="🛑 Server Shutdown Initiated",
+            description=f"Server will shut down in **{delay} seconds**.\nReason: *{reason}*",
+            color=Colour.red()
+        )
+        await ctx.send(embed=embed)
 
-@bot.command(name='kick')
+
+@bot.command(name="kick")
 @commands.has_permissions(administrator=True)
-async def kick_command(ctx, player_id: str):
-    """Kicks a player from the server using their unique SteamID/PlayerUID. Use !players to find the ID."""
-    if not player_id:
-        await ctx.send("❌ Please provide the player's SteamID/PlayerUID. Use `!players` to find it.")
-        return
-    
-    rcon_command = f"KickPlayer {player_id}"
-    try:
-        response = await _send_rcon_command(rcon_command)
-        if "kicked" in response.lower() or "completed" in response.lower() or "success" in response.lower():
-            await ctx.send(f"✅ Successfully kicked player with ID: `{player_id}`")
-        else:
-            await ctx.send(f"⚠️ Kick command sent, but received unusual response: `{response}`")
-    except Exception as e:
-        await ctx.send(f"❌ Failed to kick player. Server unreachable or RCON error: `{e}`")
+async def kick_command(ctx, steam_id: str):
+    """Kicks a player using their Steam ID."""
+    command = f"KickPlayer {steam_id}"
+    response = await _send_rcon_command(command)
 
-@bot.command(name='ban')
+    if "ERROR:" in response or "Failed" in response:
+        await ctx.send(f"❌ **Kick Failed!** Make sure the Steam ID (`{steam_id}`) is correct and the player is online. Response: {response}")
+    else:
+        embed = Embed(
+            title="👟 Player Kicked",
+            description=f"Steam ID: `{steam_id}` has been kicked from the server.",
+            color=Colour.orange()
+        )
+        await ctx.send(embed=embed)
+
+
+@bot.command(name="ban")
 @commands.has_permissions(administrator=True)
-async def ban_command(ctx, player_id: str):
-    """Bans a player from the server using their unique SteamID/PlayerUID. Use !players to find the ID."""
-    if not player_id:
-        await ctx.send("❌ Please provide the player's SteamID/PlayerUID. Use `!players` to find it.")
-        return
-        
-    rcon_command = f"BanPlayer {player_id}"
-    try:
-        response = await _send_rcon_command(rcon_command)
-        if "banned" in response.lower() or "completed" in response.lower() or "success" in response.lower():
-            await ctx.send(f"✅ Successfully banned player with ID: `{player_id}`")
-        else:
-            await ctx.send(f"⚠️ Ban command sent, but received unusual response: `{response}`")
-    except Exception as e:
-        await ctx.send(f"❌ Failed to ban player. Server unreachable or RCON error: `{e}`")
+async def ban_command(ctx, steam_id: str):
+    """Bans a player using their Steam ID."""
+    command = f"BanPlayer {steam_id}"
+    response = await _send_rcon_command(command)
 
+    if "ERROR:" in response or "Failed" in response:
+        await ctx.send(f"❌ **Ban Failed!** Make sure the Steam ID (`{steam_id}`) is correct and the player is online. Response: {response}")
+    else:
+        embed = Embed(
+            title="🔨 Player Banned",
+            description=f"Steam ID: `{steam_id}` has been **banned** from the server.",
+            color=Colour.dark_red()
+        )
+        await ctx.send(embed=embed)
 
-# --- START BOT ---
-if __name__ == "__main__":
+# ==============================================================================
+# RUN BOT
+# ==============================================================================
+
+# Ensure all critical configuration is set before running
+if not DISCORD_TOKEN or TARGET_CHANNEL_ID == 0 or not RCON_PASSWORD:
+    print("\n\n--------------------------------------------------------------")
+    print("FATAL ERROR: Please update the CONFIGURATION BLOCK in the script.")
+    print("--------------------------------------------------------------\n")
+else:
     try:
-        logger.info("Starting PalBot...")
+        # Run the bot with the specified token
         bot.run(DISCORD_TOKEN)
-    except discord.errors.LoginFailure:
-        logger.critical("FATAL: Invalid Discord token. Please check your DISCORD_TOKEN environment variable.")
     except Exception as e:
-        logger.critical(f"FATAL: An unhandled error occurred during execution: {e}")
+        print(f"\n\nFATAL RUNTIME ERROR: {e}")
+        print("Check if your DISCORD_TOKEN is valid and that you have installed discord.py.")
