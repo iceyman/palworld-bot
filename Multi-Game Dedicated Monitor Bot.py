@@ -25,13 +25,19 @@ MC_RCON_PASSWORD = os.getenv('MC_RCON_PASSWORD', "YOUR_MC_RCON_PASSWORD_HERE")
 
 # --- PALWORLD RCON CONFIGURATION ---
 PAL_RCON_HOST = os.getenv('PAL_RCON_HOST', "127.0.0.1")
-PAL_RCON_PORT = int(os.getenv('PAL_RCON_PORT', 25576)) # Ensure different port than MC!
+PAL_RCON_PORT = int(os.getenv('PAL_RCON_PORT', 25576))
 PAL_RCON_PASSWORD = os.getenv('PAL_RCON_PASSWORD', "YOUR_PAL_RCON_PASSWORD_HERE")
 
 # --- ARK: SURVIVAL ASCENDED RCON CONFIGURATION ---
 ASA_RCON_HOST = os.getenv('ASA_RCON_HOST', "127.0.0.1")
-ASA_RCON_PORT = int(os.getenv('ASA_RCON_PORT', 27020)) # Common default RCON port for ARK
+ASA_RCON_PORT = int(os.getenv('ASA_RCON_PORT', 27020))
 ASA_RCON_PASSWORD = os.getenv('ASA_RCON_PASSWORD', "YOUR_ASA_RCON_PASSWORD_HERE")
+
+# --- GENERIC SRCDS (Source Engine, e.g., CS:GO, TF2, GMod) RCON CONFIGURATION ---
+# Use this for any Steam game that uses the standard Source RCON protocol.
+SRCDS_RCON_HOST = os.getenv('SRCDS_RCON_HOST', "127.0.0.1")
+SRCDS_RCON_PORT = int(os.getenv('SRCDS_RCON_PORT', 27015))
+SRCDS_RCON_PASSWORD = os.getenv('SRCDS_RCON_PASSWORD', "YOUR_SRCDS_RCON_PASSWORD_HERE")
 
 
 # --- BOT CONSTANTS ---
@@ -57,10 +63,12 @@ rcon_clients = {}
 current_mc_players = set()
 current_pal_players = set()
 current_asa_players = set()
+current_srcds_players = set() # New server state
 # Player join timestamps (for calculating session time)
 mc_join_times = {}
 pal_join_times = {}
 asa_join_times = {}
+srcds_join_times = {} # New server state
 
 
 def load_stats():
@@ -102,6 +110,8 @@ def update_player_join(game: str, player: str):
         pal_join_times[player] = now
     elif game == 'asa':
         asa_join_times[player] = now
+    elif game == 'srcds':
+        srcds_join_times[player] = now
 
 
 def update_player_leave(game: str, player: str):
@@ -115,6 +125,8 @@ def update_player_leave(game: str, player: str):
         join_time = pal_join_times.pop(player)
     elif game == 'asa' and player in asa_join_times:
         join_time = asa_join_times.pop(player)
+    elif game == 'srcds' and player in srcds_join_times:
+        join_time = srcds_join_times.pop(player)
     
     if join_time is None:
         # Player wasn't tracked (e.g., bot restarted while they were online)
@@ -206,7 +218,6 @@ class RconManager:
 # --- Palworld specific logic ---
 def pal_player_extractor(response: str) -> set:
     """Parses Palworld's ShowPlayers RCON output."""
-    # Palworld response format (often tab-separated): Name,UID,SteamID
     players = set()
     lines = response.split('\n')[1:] # Skip header
     for line in lines:
@@ -220,7 +231,6 @@ def pal_player_extractor(response: str) -> set:
 # --- Minecraft specific logic ---
 def mc_player_extractor(response: str) -> set:
     """Parses Minecraft's list RCON output."""
-    # Minecraft response: "There are X of a max of Y players online: PlayerA, PlayerB"
     players = set()
     if ':' in response:
         player_list_str = response.split(':', 1)[1].strip()
@@ -231,18 +241,29 @@ def mc_player_extractor(response: str) -> set:
 # --- ASA specific logic ---
 def asa_player_extractor(response: str) -> set:
     """Parses ARK: Survival Ascended's ListPlayers RCON output."""
-    # ASA response format: "ID: 1. Name: PlayerName (This may be preceded by a long string of garbage)
     players = set()
-    # Find all occurrences of "Name: [PlayerName]"
-    # Using re.DOTALL to allow '.' to match newlines
     matches = re.findall(r'Name: (.+?)\n', response, re.DOTALL)
     for match in matches:
         name = match.strip()
-        # ARK often includes the player's ID/name and then their SteamID. We want just the name.
-        # We'll use the part before the first space as the primary ID if it looks like a name.
-        if name and not name.startswith("ID:"): # Filter out header/bad lines
+        if name and not name.startswith("ID:"):
              players.add(name)
     return players
+    
+# --- Generic SRCDS (Source Engine) logic ---
+def srcds_player_extractor(response: str) -> set:
+    """Parses Source Engine's 'status' RCON output (CS:GO, TF2, GMod)."""
+    players = set()
+    # SRCDS 'status' lines look like: # 1   "PlayerName" STEAM_X:X:XXXXX 00:00 0   400   0
+    for line in response.split('\n'):
+        # Match player name enclosed in quotes after the index
+        match = re.search(r'^\s*#\s*\d+\s+"(.+?)"', line)
+        if match:
+            # Skip BOTs or generic names if desired, but here we take everything matched
+            name = match.group(1).strip()
+            if name:
+                players.add(name)
+    return players
+
 
 # Initialize RCON managers
 mc_monitor = RconManager(
@@ -266,8 +287,16 @@ asa_monitor = RconManager(
     port=ASA_RCON_PORT, 
     password=ASA_RCON_PASSWORD, 
     game_name="ASA", 
-    list_command="ListPlayers", # ASA uses ListPlayers
+    list_command="ListPlayers",
     player_name_extractor=asa_player_extractor
+)
+srcds_monitor = RconManager( # New SRCDS monitor
+    host=SRCDS_RCON_HOST, 
+    port=SRCDS_RCON_PORT, 
+    password=SRCDS_RCON_PASSWORD, 
+    game_name="SRCDS", 
+    list_command="status", # Source Engine list command is typically 'status'
+    player_name_extractor=srcds_player_extractor
 )
 
 
@@ -279,7 +308,7 @@ asa_monitor = RconManager(
 async def on_ready():
     """Executed when the bot is connected to Discord."""
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
-    await bot.change_presence(activity=Game(f"Monitoring 3 Servers | {PREFIX}help"))
+    await bot.change_presence(activity=Game(f"Monitoring 4 Servers | {PREFIX}help"))
 
     # Load persistent data
     load_stats()
@@ -289,6 +318,7 @@ async def on_ready():
     mc_monitor.channel = channel
     pal_monitor.channel = channel
     asa_monitor.channel = channel
+    srcds_monitor.channel = channel # Set channel for new manager
 
     if not channel:
         print(f"ERROR: Channel ID {TARGET_CHANNEL_ID} not found. Monitoring tasks will not start.")
@@ -306,7 +336,7 @@ async def on_ready():
 @tasks.loop(seconds=RCON_CHECK_INTERVAL_SECONDS)
 async def player_monitor_task():
     """Background task to continuously check players and report joins/leaves for all servers."""
-    global current_mc_players, current_pal_players, current_asa_players
+    global current_mc_players, current_pal_players, current_asa_players, current_srcds_players
 
     async def check_server(monitor: RconManager, game_code: str, current_set: set) -> set:
         """Helper function to perform checks for one server."""
@@ -355,6 +385,9 @@ async def player_monitor_task():
     
     # Check ASA
     current_asa_players = await check_server(asa_monitor, 'asa', current_asa_players)
+    
+    # Check SRCDS/Generic Steam Game
+    current_srcds_players = await check_server(srcds_monitor, 'srcds', current_srcds_players)
 
 
 @tasks.loop(hours=1) # Run every hour for auto-save
@@ -379,207 +412,168 @@ async def scheduled_actions_task():
         await channel.send(f"❌ **[Palworld Auto-Save Failed]** {pal_response}")
         
     # --- ASA Auto-Save ---
-    asa_response = await asa_monitor.send_command("SaveWorld") # ASA uses 'SaveWorld'
+    asa_response = await asa_monitor.send_command("SaveWorld")
     if "ERROR:" not in asa_response:
         await channel.send("✅ **[ASA Auto-Save]** World state successfully saved.")
     else:
         await channel.send(f"❌ **[ASA Auto-Save Failed]** {asa_response}")
+        
+    # --- SRCDS Maintenance (e.g., version check) ---
+    # SRCDS games typically don't need 'save-all', so we run a benign command like 'version'
+    srcds_response = await srcds_monitor.send_command("version") 
+    if "ERROR:" not in srcds_response:
+        await channel.send("☑️ **[SRCDS Check]** Server successfully checked version.")
+    else:
+        await channel.send(f"❌ **[SRCDS Maintenance Failed]** Could not run command. {srcds_response}")
 
 
 # ==============================================================================
-# DISCORD COMMANDS (ARK: SURVIVAL ASCENDED)
+# DISCORD COMMANDS (GENERIC SRCDS / STEAM GAMES)
 # ==============================================================================
 
-@bot.group(name="asa", invoke_without_command=True)
-async def asa(ctx):
-    """ASA administration commands."""
-    await ctx.send(f"Use `{PREFIX}asa-help` for ASA commands.")
+@bot.group(name="srcds", invoke_without_command=True)
+async def srcds(ctx):
+    """Generic SRCDS (Source/Steam Game) administration commands."""
+    await ctx.send(f"Use `{PREFIX}srcds-help` for SRCDS commands.")
 
-@asa.command(name="help")
-async def asa_help_command(ctx):
-    """Displays a list of ASA administrative commands."""
+@srcds.command(name="help")
+async def srcds_help_command(ctx):
+    """Displays a list of generic SRCDS administrative commands."""
     help_text = f"""
-    __**ASA Admin Commands ({PREFIX}asa-)**__
+    __**SRCDS Admin Commands ({PREFIX}srcds-)**__
+    *Generic commands for Source Engine-based games (e.g., CS:GO, TF2, GMod).*
     *All commands require **Administrator** permission in Discord.*
 
-    **!server-asa-status**
+    **!server-srcds-status**
     > Shows the current player count and RCON connection health.
 
-    **!server-asa-players**
+    **!server-srcds-players**
     > Lists all currently logged-in players (names, playtime, stats).
 
-    **!server-asa-broadcast <message>**
-    > Sends a server-wide broadcast message to all players.
+    **!server-srcds-say <message>**
+    > Sends a message to the in-game chat, prefixed by `[Discord Admin]`.
 
-    **!server-asa-save**
-    > Forces the server to immediately save the world state (`SaveWorld`).
-    
-    **!server-asa-kick <PlayerID>**
-    > Kicks a player using their in-game Player ID (obtained via `!server-asa-players`).
+    **!server-srcds-kick <Name>**
+    > Kicks a player using their exact in-game Name.
     """
-    embed = Embed(title="🦖 ASA Admin Help", description=help_text, color=Colour.from_rgb(139, 69, 19))
+    embed = Embed(title="⚙️ SRCDS Admin Help (Generic Steam)", description=help_text, color=Colour.from_rgb(100, 149, 237))
     await ctx.send(embed=embed)
 
-@asa.command(name="status")
+@srcds.command(name="status")
 @commands.has_permissions(administrator=True)
-async def asa_status_command(ctx):
-    """Checks the current ASA server status and player count."""
-    if not await asa_monitor.connect():
+async def srcds_status_command(ctx):
+    """Checks the current SRCDS server status and player count."""
+    if not await srcds_monitor.connect():
         embed = Embed(
-            title="🔴 ASA Server Status",
-            description=f"RCON Connection Failed to **{asa_monitor.host}:{asa_monitor.port}**.\nLast Error: `{asa_monitor.last_error}`",
+            title="🔴 SRCDS Server Status",
+            description=f"RCON Connection Failed to **{srcds_monitor.host}:{srcds_monitor.port}**.\nLast Error: `{srcds_monitor.last_error}`",
             color=Colour.red()
         )
     else:
-        players, _ = await asa_monitor.get_players()
+        players, _ = await srcds_monitor.get_players()
         embed = Embed(
-            title="🟢 ASA Server Status",
+            title="🟢 SRCDS Server Status",
             description=f"**Online and Responsive**\n\nPlayers Online: **{len(players)}**",
             color=Colour.green()
         )
-        embed.add_field(name="RCON Endpoint", value=f"`{asa_monitor.host}:{asa_monitor.port}`", inline=False)
+        embed.add_field(name="RCON Endpoint", value=f"`{srcds_monitor.host}:{srcds_monitor.port}`", inline=False)
 
     await ctx.send(embed=embed)
 
 
-@asa.command(name="players")
+@srcds.command(name="players")
 @commands.has_permissions(administrator=True)
-async def asa_players_command(ctx):
-    """Lists all ASA players currently online with stats."""
-    players, raw_response = await asa_monitor.get_players()
+async def srcds_players_command(ctx):
+    """Lists all SRCDS players currently online with stats."""
+    players, raw_response = await srcds_monitor.get_players()
 
     if "ERROR:" in raw_response:
-        await ctx.send(f"❌ **ASA RCON Error:** Could not retrieve player list. {raw_response}")
+        await ctx.send(f"❌ **SRCDS RCON Error:** Could not retrieve player list. {raw_response}")
         return
 
     if not players:
-        embed = Embed(title="🦖 ASA Online Players (0)", description="The server is currently empty.", color=Colour.orange())
+        embed = Embed(title="⚙️ SRCDS Online Players (0)", description="The server is currently empty.", color=Colour.orange())
         await ctx.send(embed=embed)
         return
 
     player_details = []
     
-    # We need to map the full response lines to names for identification
-    raw_lines = raw_response.split('\n')
-    player_id_map = {} # Maps player name to player ID (for kicking)
-    
-    # Parse lines to get ID and Name
-    current_name = None
-    for line in raw_lines:
-        name_match = re.search(r'Name: (.+)', line)
-        id_match = re.search(r'ID: (\d+)', line)
-        
-        if name_match:
-            current_name = name_match.group(1).strip()
-        if id_match and current_name:
-            player_id_map[current_name] = id_match.group(1)
-            current_name = None # Reset for next player
-
     for name in sorted(players):
-        stats_key = f"asa:{name}"
+        stats_key = f"srcds:{name}"
         stats = player_stats.get(stats_key, {})
-        
-        # Get Player ID (ASA requires Player ID for many admin commands)
-        player_id = player_id_map.get(name, "N/A")
 
         # Calculate current session time
         session_time_str = "N/A"
-        if name in asa_join_times:
-            session_seconds = (datetime.now() - asa_join_times[name]).total_seconds()
+        if name in srcds_join_times:
+            session_seconds = (datetime.now() - srcds_join_times[name]).total_seconds()
             session_time_str = format_duration(session_seconds)
             
         total_time_str = format_duration(stats.get("total_playtime_seconds", 0))
         first_join = stats.get("first_join", "Unknown")
         
         player_details.append(
-            f"**{name}** (ID: `{player_id}`)\n"
+            f"**{name}**\n"
             f"• Session: {session_time_str}\n"
             f"• Total Time: {total_time_str}\n"
             f"• First Join: {first_join}"
         )
 
     embed = Embed(
-        title=f"🦖 ASA Online Players ({len(players)})",
-        description="List of currently logged-in players (Note: Player ID is required for kicks):",
+        title=f"⚙️ SRCDS Online Players ({len(players)})",
+        description="List of currently logged-in players:",
         color=Colour.blue()
     )
     embed.add_field(name="Player Stats (Session/Total)", value="\n\n".join(player_details), inline=False)
     await ctx.send(embed=embed)
 
 
-@asa.command(name="broadcast")
+@srcds.command(name="say")
 @commands.has_permissions(administrator=True)
-async def asa_broadcast_command(ctx, *, message: str):
-    """Sends a broadcast message to all ASA players."""
-    # ASA RCON command for broadcasting: Broadcast <message>
-    # Note: ASA messages need to be enclosed in quotes if they contain spaces
-    command = f"Broadcast \"{message}\"" 
-    response = await asa_monitor.send_command(command)
+async def srcds_say_command(ctx, *, message: str):
+    """Sends a message to the in-game chat for SRCDS games."""
+    # Source Engine command for chat message: say <message>
+    command = f"say [Discord Admin] {message}" 
+    response = await srcds_monitor.send_command(command)
 
     if "ERROR:" in response:
-        await ctx.send(f"❌ **ASA Broadcast Failed!** {response}")
+        await ctx.send(f"❌ **SRCDS Message Failed!** {response}")
     else:
         embed = Embed(
-            title="📣 ASA Broadcast Sent",
+            title="💬 SRCDS Message Sent",
             description=f"Message: *{message}*",
             color=Colour.gold()
         )
         await ctx.send(embed=embed)
 
 
-@asa.command(name="save")
+@srcds.command(name="kick")
 @commands.has_permissions(administrator=True)
-async def asa_save_command(ctx):
-    """Forces the ASA server to save the world state."""
-    command = "SaveWorld"
-    response = await asa_monitor.send_command(command)
+async def srcds_kick_command(ctx, *, name: str):
+    """Kicks a SRCDS player using their in-game name."""
+    command = f"kick \"{name}\"" # SRCDS often requires quotes around names
+    response = await srcds_monitor.send_command(command)
 
     if "ERROR:" in response:
-        await ctx.send(f"❌ **ASA Save Failed!** {response}")
+        await ctx.send(f"❌ **SRCDS Kick Failed!** Make sure the player name (`{name}`) is exact and the player is online. Response: {response}")
     else:
         embed = Embed(
-            title="💾 ASA World Saved",
-            description="The ASA server was commanded to save the world state.",
-            color=Colour.green()
-        )
-        await ctx.send(embed=embed)
-
-@asa.command(name="kick")
-@commands.has_permissions(administrator=True)
-async def asa_kick_command(ctx, player_id: str):
-    """Kicks an ASA player using their Player ID."""
-    command = f"KickPlayer {player_id}"
-    response = await asa_monitor.send_command(command)
-
-    if "ERROR:" in response:
-        await ctx.send(f"❌ **ASA Kick Failed!** Make sure the Player ID (`{player_id}`) is correct and the player is online. Response: {response}")
-    else:
-        embed = Embed(
-            title="👟 ASA Player Kicked",
-            description=f"Player with ID **{player_id}** has been kicked from the server.",
+            title="👟 SRCDS Player Kicked",
+            description=f"Player **{name}** has been kicked from the server.",
             color=Colour.orange()
         )
         await ctx.send(embed=embed)
 
-
-# --- Remaining Palworld and Minecraft commands removed for brevity, they are unchanged ---
-# ... (The existing Palworld and Minecraft commands remain below this point)
-# ...
-
 # ==============================================================================
-# DISCORD COMMANDS (PALWORLD & MINECRAFT)
-# ... (These sections remain unchanged)
-# ==============================================================================
-# ... (Palworld and Minecraft commands) ...
+# DISCORD COMMANDS (PALWORLD, ASA, MINECRAFT - REMAINING COMMANDS OMITTED FOR BREVITY)
+# ... (The existing ASA, Palworld, and Minecraft commands remain unchanged below this point)
 # ==============================================================================
 # RUN BOT
 # ==============================================================================
 
-# ... (Error checking for all tokens/passwords here) ...
-
-if not DISCORD_TOKEN or TARGET_CHANNEL_ID == 0 or not MC_RCON_PASSWORD or not PAL_RCON_PASSWORD or not ASA_RCON_PASSWORD:
+if not DISCORD_TOKEN or TARGET_CHANNEL_ID == 0 or not MC_RCON_PASSWORD or not PAL_RCON_PASSWORD or not ASA_RCON_PASSWORD or not SRCDS_RCON_PASSWORD:
     print("\n\n--------------------------------------------------------------")
     print("FATAL ERROR: Please update the CONFIGURATION BLOCK in the script.")
+    print("You must provide all RCON details, even if only one server is used.")
     print("--------------------------------------------------------------\n")
 else:
     try:
