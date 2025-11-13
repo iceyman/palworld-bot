@@ -44,6 +44,7 @@ SRCDS_RCON_PASSWORD = os.getenv('SRCDS_RCON_PASSWORD', "YOUR_SRCDS_RCON_PASSWORD
 PREFIX = "!server-"
 RCON_CHECK_INTERVAL_SECONDS = 30
 STATISTICS_FILE = "player_stats.json"
+PALWORLD_BLACKLIST_FILE = "palworld_blacklist.txt" # NEW: Blacklist file name
 
 # ==============================================================================
 # GLOBAL STATE & PERSISTENCE
@@ -69,6 +70,9 @@ mc_join_times = {}
 pal_join_times = {}
 asa_join_times = {}
 srcds_join_times = {}
+
+# NEW: Global set for blacklisted Palworld Steam IDs
+palworld_blacklist = set() 
 
 
 def load_stats():
@@ -97,6 +101,24 @@ def save_stats():
         os.replace(temp_file, STATISTICS_FILE)
     except Exception as e:
         print(f"Error saving stats: {e}")
+
+# NEW: Blacklist loading function
+def load_palworld_blacklist():
+    """Loads Palworld Steam IDs from the blacklist file."""
+    global palworld_blacklist
+    if not os.path.exists(PALWORLD_BLACKLIST_FILE):
+        palworld_blacklist = set()
+        return
+    try:
+        with open(PALWORLD_BLACKLIST_FILE, 'r') as f:
+            # Read lines, strip whitespace, filter out comments (#) and empty lines
+            new_blacklist = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+            palworld_blacklist = new_blacklist
+            print(f"Palworld blacklist reloaded with {len(palworld_blacklist)} IDs.")
+    except Exception as e:
+        print(f"Error loading Palworld blacklist: {e}")
+        palworld_blacklist = set()
+
 
 def update_player_join(game: str, player: str):
     """Updates player stats upon joining."""
@@ -332,6 +354,7 @@ async def on_ready():
 
     # Load persistent data
     load_stats()
+    load_palworld_blacklist() # NEW: Initial blacklist load
     
     # Set channels for RCON managers
     channel = bot.get_channel(TARGET_CHANNEL_ID)
@@ -351,6 +374,19 @@ async def on_ready():
     if not scheduled_actions_task.running:
         scheduled_actions_task.start()
         print("Scheduled actions task started.")
+    if not palworld_blacklist_reloader.running: # NEW: Start blacklist reloader
+        palworld_blacklist_reloader.start()
+        print("Palworld blacklist reloader started.")
+
+
+@tasks.loop(minutes=5) # NEW: Task to reload the blacklist periodically
+async def palworld_blacklist_reloader():
+    """Reloads the Palworld blacklist periodically."""
+    load_palworld_blacklist()
+    if bot.is_ready():
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+             await log_channel.send(f"✅ **Palworld Blacklist:** Reloaded {len(palworld_blacklist)} Steam IDs.")
 
 
 @tasks.loop(seconds=RCON_CHECK_INTERVAL_SECONDS)
@@ -383,6 +419,28 @@ async def player_monitor_task():
                 # Send the specific RCON error to the log channel
                 await log_channel.send(f"⚠️ **{monitor.game_name} RCON Error:** {raw_response}")
             return set() # Treat as no players or unknown state
+
+        # --- NEW: PALWORLD BLACKLIST CHECK (Runs before join/leave logic) ---
+        if game_code == 'pal' and palworld_blacklist:
+            # Palworld RCON response format: Name,UID,SteamID (lines 2+)
+            lines = raw_response.split('\n')[1:]
+            
+            for line in lines:
+                parts = [p.strip() for p in line.split(',', 2)] # Name,UID,SteamID
+                if len(parts) == 3 and parts[0] != "Name":
+                    name, _, steam_id = parts
+                    
+                    if steam_id in palworld_blacklist:
+                        # Player is blacklisted, auto-kick them
+                        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                        kick_response = await monitor.send_command(f"KickPlayer {steam_id}")
+                        
+                        if log_channel:
+                             # Send log message about the action
+                             await log_channel.send(f"🚨 **Blacklist Auto-Kick (Palworld):** Player **{name}** (`{steam_id}`) was kicked. Response: `{kick_response[:50]}...`")
+                        
+                        # Remove kicked player from the 'new_players' set so they don't trigger join/leave notifications
+                        new_players.discard(name)
 
         # Check for Joins
         joined_players = new_players - current_set
@@ -766,6 +824,8 @@ async def pal_help_command(ctx):
 
     **!server-pal-shutdown <seconds> <message>**
     > Shuts down the server after a delay with a broadcast message.
+    
+    **💡 Blacklist Note:** Players listed in `palworld_blacklist.txt` are automatically kicked every 30 seconds.
     """
     embed = Embed(title="🐾 Palworld Admin Help", description=help_text, color=Colour.from_rgb(255, 100, 100))
     await ctx.send(embed=embed)
@@ -1069,6 +1129,7 @@ async def on_command_error(ctx, error):
 if DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN_HERE" and DISCORD_TOKEN:
     # Run the bot
     try:
+        # Run the bot with the specified token
         bot.run(DISCORD_TOKEN)
     except Exception as e:
         print(f"Failed to run the bot. Check your DISCORD_TOKEN and permissions. Error: {e}")
