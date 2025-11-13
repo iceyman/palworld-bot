@@ -1,15 +1,15 @@
-# **🎮 Multi-Game Dedicated Server Monitor Bot**
+# **🎮 Multi-Game Dedicated Server Monitor Bot (4 Servers)**
 
-This Python-based Discord bot provides unified monitoring and administrative control for **Minecraft**, **Palworld**, and **ARK: Survival Ascended (ASA)** dedicated servers using RCON (Remote Console) protocol. It tracks real-time player joins/leaves, manages scheduled maintenance (like auto-saves), and maintains persistent player statistics.
+This Python-based Discord bot provides unified monitoring and administrative control for up to four game servers: **Minecraft**, **Palworld**, **ARK: Survival Ascended (ASA)**, and a **Generic SRCDS (Source Engine) Game**. It uses the RCON (Remote Console) protocol for real-time interaction.
 
 ## **✨ Features**
 
-* **Unified Monitoring:** Manages RCON connections and monitors player status for all three games simultaneously from a single bot process.  
+* **Unified Monitoring (4 Games):** Manages RCON connections and monitors player status for all four game types simultaneously from a single bot process.  
 * **Real-Time Player Tracking:** Reports player joins and leaves directly to a specified Discord channel.  
 * **Persistent Player Stats:** Tracks and records each player's **First Join** date and **Total Playtime** using a local player\_stats.json file.  
-* **Scheduled Maintenance:** Runs automatic hourly commands to force a world save for all three servers (including SaveWorld for ASA).  
-* **RCON Health Checks:** Continuously verifies the RCON connection status and reports connectivity issues to a designated log channel.  
-* **Administrative Commands:** Allows Discord users with the **Administrator** role to execute server-side commands.
+* **Scheduled Maintenance:** Runs automatic hourly commands to force a world save/perform maintenance for all four servers.  
+* **RCON Health Checks:** Continuously verifies the RCON connection status.  
+* **Administrative Commands:** Allows Discord users with the **Administrator** role to execute server-side commands across all monitored games.
 
 ## **🛠️ Setup and Installation**
 
@@ -18,7 +18,7 @@ This Python-based Discord bot provides unified monitoring and administrative con
 1. **Python:** Python 3.8+ installed on your host machine.  
 2. **Discord Bot Token:** A Discord application bot token.  
 3. **Discord Channel IDs:** The ID of the primary announcement channel and a private log channel.  
-4. **RCON Enabled:** Ensure RCON is enabled and configured correctly on all three dedicated servers (using unique passwords and ports).
+4. **RCON Enabled:** Ensure RCON is enabled and configured correctly on all dedicated servers you plan to use.
 
 ### **Dependencies**
 
@@ -44,6 +44,11 @@ All configuration is handled in the top section of the multi\_game\_monitor.py f
 | ASA\_RCON\_HOST | ASA server IP or hostname. | 127.0.0.1 |
 | ASA\_RCON\_PORT | ASA RCON port (often 27020). | 27020 |
 | ASA\_RCON\_PASSWORD | ASA RCON password. | my-secret-asa-pass |
+| **SRCDS\_RCON\_HOST** | **Generic Steam (SRCDS) IP/hostname.** | 127.0.0.1 |
+| **SRCDS\_RCON\_PORT** | **Generic Steam (SRCDS) RCON port.** | 27015 |
+| **SRCDS\_RCON\_PASSWORD** | **Generic Steam (SRCDS) password.** | my-secret-srcds-pass |
+
+💡 **Note on SRCDS:** The **SRCDS** commands are set up for games using the standard Source Engine RCON protocol (like CS:GO, TF2, Garry's Mod). For other Steam games (like Rust or Valheim), you might need to adjust the list\_command and player\_name\_extractor functions slightly to match that game's specific RCON output format.
 
 ### **Running the Bot**
 
@@ -55,6 +60,15 @@ python multi\_game\_monitor.py
 
 All commands start with the prefix \!server-. All administrative commands require the Discord user to have the **Administrator** permission.
 
+### **⚙️ Generic SRCDS Commands (\!server-srcds-)**
+
+| Command | Arguments | Description |
+| :---- | :---- | :---- |
+| \!server-srcds-status | None | Checks RCON health and current player count. |
+| \!server-srcds-players | None | Lists online players, session time, and total playtime. |
+| \!server-srcds-say | \<message\> | Sends a message to the in-game chat, prefixed by \[Discord Admin\]. |
+| \!server-srcds-kick | \<Name\> | Kicks a player using their exact in-game **Name**. |
+
 ### **🦖 ASA Commands (\!server-asa-)**
 
 | Command | Arguments | Description |
@@ -63,18 +77,7 @@ All commands start with the prefix \!server-. All administrative commands requir
 | \!server-asa-players | None | Lists online players, session time, and total playtime. **(Provides Player ID for kicks)** |
 | \!server-asa-broadcast | \<message\> | Sends a server-wide broadcast message to all players. |
 | \!server-asa-save | None | Forces the world to save (SaveWorld). |
-| \!server-asa-kick | \<PlayerID\> | Kicks a player using their in-game Player ID (obtained from the players command). |
-
-### **🧱 Minecraft Commands (\!server-mine-)**
-
-| Command | Arguments | Description |
-| :---- | :---- | :---- |
-| \!server-mine-status | None | Checks RCON health and current player count. |
-| \!server-mine-players | None | Lists online players, session time, and total playtime. |
-| \!server-mine-say | \<message\> | Sends a message to the in-game chat, prefixed by \[Discord Admin\]. |
-| \!server-mine-save | None | Forces the world to save (save-all). |
-| \!server-mine-kick | \<Name\> | Kicks a player using their exact in-game name. |
-| \!server-mine-ban | \<Name\> | Bans a player using their exact in-game name. |
+| \!server-asa-kick | \<PlayerID\> | Kicks a player using their in-game **Player ID**. |
 
 ### **🎮 Palworld Commands (\!server-pal-)**
 
@@ -86,4 +89,15 @@ All commands start with the prefix \!server-. All administrative commands requir
 | \!server-pal-save | None | Forces the server to immediately save the world state (Save). |
 | \!server-pal-kick | \<SteamID\> | Kicks a player using their **SteamID** (not name). |
 | \!server-pal-shutdown | \<seconds\> \<message\> | Initiates server shutdown after a delay with a broadcast. |
+
+### **🧱 Minecraft Commands (\!server-mine-)**
+
+| Command | Arguments | Description |
+| :---- | :---- | :---- |
+| \!server-mine-status | None | Checks RCON health and current player count. |
+| \!server-mine-players | None | Lists online players, session time, and total playtime. |
+| \!server-mine-say | \<message\> | Sends a message to the in-game chat, prefixed by \[Discord Admin\]. |
+| \!server-mine-save | None | Forces the world to save (save-all). |
+| \!server-mine-kick | \<Name\> | Kicks a player using their exact in-game name. |
+| \!server-mine-ban | \<Name\> | Bans a player using their exact in-game name. |
 
